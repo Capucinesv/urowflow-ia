@@ -1,0 +1,10 @@
+streamlit
+torch
+librosa
+numpy
+pandas
+scikit-learn
+matplotlib
+scipy
+soundfile
+requests
