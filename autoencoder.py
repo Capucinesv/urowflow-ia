@@ -6,8 +6,8 @@ import os
 
 INPUT_DIM   = 53
 LATENT_DIM  = 8
-MODEL_PATH  = os.path.join(os.path.dirname(__file__), "..", "models", "autoencoder_real.pt")
-SCALER_PATH = os.path.join(os.path.dirname(__file__), "..", "models", "scaler.pkl")
+MODEL_PATH  = os.path.join(os.path.dirname(__file__), "autoencoder_real.pt")
+SCALER_PATH = os.path.join(os.path.dirname(__file__), "scaler.pkl")
 
 SEUIL_NORMAL = 2.0
 SEUIL_ELEVE  = 8.0
