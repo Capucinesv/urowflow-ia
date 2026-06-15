@@ -218,7 +218,7 @@ if uploaded or demo:
     # ── Rapport ───────────────────────────────────────────────────────────────
     st.markdown("---")
     st.header("④ Rapport clinique")
-    from src.explainer import generate_report_demo
+   from explainer import generate_report_demo
     rapport = generate_report_demo(score, attn_scores, err, duration)
     if risk == "faible": st.success(rapport)
     elif risk == "modéré": st.warning(rapport)
