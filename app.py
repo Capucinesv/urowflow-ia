@@ -3,7 +3,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import sys
 import os
-sys.path.insert(0, '/mount/src/urowflow-ia')
+
 st.set_page_config(page_title="UroFlow AI", page_icon="🏥", layout="wide")
 st.title("🏥 UroFlow AI")
 st.markdown("**Analyse acoustique du débit urinaire** — Détection d'anomalies par IA")
@@ -218,7 +218,7 @@ if uploaded or demo:
     # ── Rapport ───────────────────────────────────────────────────────────────
     st.markdown("---")
     st.header("④ Rapport clinique")
-   from explainer import generate_report_demo
+    from explainer import generate_report_demo
     rapport = generate_report_demo(score, attn_scores, err, duration)
     if risk == "faible": st.success(rapport)
     elif risk == "modéré": st.warning(rapport)
