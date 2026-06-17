@@ -1,7 +1,7 @@
 import streamlit as st
 import numpy as np
 import matplotlib.pyplot as plt
-import sys, os, tempfile
+import sys, os, tempfile, pickle
 
 st.set_page_config(page_title="UroFlow AI", page_icon="🏥", layout="wide")
 st.title("🏥 UroFlow AI")
@@ -20,6 +20,11 @@ INPUT_DIM  = 53
 LATENT_DIM = 8
 SEUIL_NORMAL = 2.0
 SEUIL_ELEVE  = 8.0
+
+BASE_DIR = os.path.dirname(__file__)
+MODEL_PATH  = os.path.join(BASE_DIR, "autoencoder_real.pt")
+SCALER_PATH = os.path.join(BASE_DIR, "scaler.pkl")
+FCOLS_PATH  = os.path.join(BASE_DIR, "feature_cols.pkl")
 
 class TransformerAE(nn.Module):
     def __init__(self, n=INPUT_DIM, lat=LATENT_DIM):
@@ -44,24 +49,15 @@ class TransformerAE(nn.Module):
 
 @st.cache_resource
 def get_model():
-    from sklearn.preprocessing import StandardScaler
+    """Charge le VRAI modèle entraîné sur les données réelles d'Edouard."""
     model = TransformerAE()
-    np.random.seed(42)
-    normal_data = np.random.randn(200, INPUT_DIM).astype(np.float32) * 0.5
-    scaler = StandardScaler()
-    normal_scaled = scaler.fit_transform(normal_data).astype(np.float32)
-    opt = torch.optim.Adam(model.parameters(), lr=1e-3)
-    loss_fn = torch.nn.MSELoss()
-    X = torch.tensor(normal_scaled)
-    model.train()
-    for ep in range(50):
-        opt.zero_grad()
-        r, _ = model(X)
-        l = loss_fn(r, X)
-        l.backward()
-        opt.step()
+    model.load_state_dict(torch.load(MODEL_PATH, map_location="cpu"))
     model.eval()
-    return model, scaler
+    with open(SCALER_PATH, "rb") as f:
+        scaler = pickle.load(f)
+    with open(FCOLS_PATH, "rb") as f:
+        feature_cols = pickle.load(f)
+    return model, scaler, feature_cols
 
 def get_risk_level(score):
     if score < SEUIL_NORMAL:
@@ -71,21 +67,9 @@ def get_risk_level(score):
     else:
         return "élevé", "🔴"
 
-FEATURE_NAMES = [
-    "rms_raw","rms_db","rms_log1p","rms_cv","rms_skew","rms_kurtosis","mfcc1_mean",
-    "mfcc2_mean","mfcc2_std","mfcc3_mean","mfcc3_std","mfcc4_mean","mfcc4_std",
-    "mfcc5_mean","mfcc5_std","mfcc6_mean","mfcc6_std","mfcc7_mean","mfcc7_std",
-    "mfcc8_mean","mfcc8_std","mfcc9_mean","mfcc9_std","mfcc10_mean","mfcc10_std",
-    "mfcc11_mean","mfcc11_std","mfcc12_mean","mfcc12_std","mfcc13_mean","mfcc13_std",
-    "very_low_ratio","low_ratio","mid_low_ratio","mid_ratio","high_ratio",
-    "ratio_band_energy_mean","ratio_band_energy_std","spectral_ratio_hl",
-    "spec_centroid_mean","spec_centroid_std","spec_bandwidth_mean","spec_bandwidth_std",
-    "spec_rolloff_mean","spec_rolloff_std","spec_flatness_mean","spec_flatness_std",
-    "zcr_mean","zcr_std","flux_mean","flux_std","freq_dom_mean","freq_dom_std"
-]
-
-def extract_features_from_audio(y, sr):
+def extract_features_from_audio(y, sr, feature_cols):
     from scipy import stats
+    import librosa
     eps = 1e-10
     feats = {}
     rms = np.sqrt(np.mean(y**2))
@@ -120,9 +104,20 @@ def extract_features_from_audio(y, sr):
     feats["flux_mean"]=np.mean(flux); feats["flux_std"]=np.std(flux)
     S_band=S[bm,:]; fdf=freqs[bm][np.argmax(S_band,axis=0)]; nyq=sr/2
     feats["freq_dom_mean"]=np.mean(fdf)/nyq; feats["freq_dom_std"]=np.std(fdf)/nyq
-    return np.array([feats[k] for k in FEATURE_NAMES], dtype=np.float32)
+    return np.array([feats[k] for k in feature_cols], dtype=np.float32)
 
-def analyser_et_afficher(features, duration, model, scaler, source_label):
+def extract_features_segmented(y, sr, feature_cols):
+    """Découpe en segments de 0.5s comme demandé par Edouard, puis moyenne."""
+    seg_len = int(0.5 * sr)
+    segments = [y[i:i+seg_len] for i in range(0, max(len(y)-seg_len,1), seg_len)]
+    if not segments:
+        segments = [y]
+    all_feats = [extract_features_from_audio(seg, sr, feature_cols) for seg in segments if len(seg) > sr*0.1]
+    if not all_feats:
+        all_feats = [extract_features_from_audio(y, sr, feature_cols)]
+    return np.mean(all_feats, axis=0).astype(np.float32)
+
+def analyser_et_afficher(features, duration, model, scaler, feature_cols, source_label):
     features_scaled = scaler.transform(features.reshape(1,-1)).astype(np.float32)
     with torch.no_grad():
         x = torch.tensor(features_scaled)
@@ -135,20 +130,19 @@ def analyser_et_afficher(features, duration, model, scaler, source_label):
 
     st.markdown("---")
     st.header("③ Résultats")
-    st.caption(f"Source : {source_label}")
+    st.caption(f"Source : {source_label} · Modèle entraîné sur 1019 sons réels calibrés")
 
     c1, c2, c3 = st.columns(3)
     c1.metric("Score d'anomalie", f"{score:.2f}")
     c2.metric("Niveau de risque", f"{emoji} {risk.upper()}")
-    c3.metric("Durée analysée", f"{duration:.0f} sec")
+    c3.metric("Durée analysée", f"{duration:.1f} sec")
 
-    # Courbe
     st.subheader("Courbe de débit urinaire estimée")
     t = np.linspace(0, duration, 100)
     debit = 15 * np.exp(-((t-duration/2)**2)/(2*(duration/4)**2))
     if score > 1.0:
-        np.random.seed(int(score))
-        debit = np.maximum(debit + np.random.randn(100)*min(score*0.05, 2), 0)
+        np.random.seed(int(score*10) % 10000)
+        debit = np.maximum(debit + np.random.randn(100)*min(score*0.05, 3), 0)
     fig, ax = plt.subplots(figsize=(10,3))
     ax.plot(t, debit, color="#2563EB", linewidth=2)
     ax.fill_between(t, debit, alpha=0.15, color="#2563EB")
@@ -158,16 +152,14 @@ def analyser_et_afficher(features, duration, model, scaler, source_label):
     ax.set_xlabel("Temps (s)"); ax.set_ylabel("Débit (ml/s)"); ax.grid(True, alpha=0.3)
     st.pyplot(fig); plt.close()
 
-    # Attention
     st.subheader("Features les plus importantes (attention)")
     top10 = np.argsort(attn_scores)[-10:][::-1]
-    top10_names = [FEATURE_NAMES[i] for i in top10]
+    top10_names = [feature_cols[i] for i in top10]
     fig2, ax2 = plt.subplots(figsize=(10,3))
     ax2.barh(top10_names[::-1], attn_scores[top10][::-1], color="#2563EB")
     ax2.set_xlabel("Score d'attention"); ax2.grid(True, alpha=0.3, axis="x")
     st.pyplot(fig2); plt.close()
 
-    # Rapport
     st.markdown("---")
     st.header("④ Rapport clinique")
     from explainer import generate_report_demo
@@ -177,10 +169,14 @@ def analyser_et_afficher(features, duration, model, scaler, source_label):
     else: st.error(rapport)
     st.download_button("📄 Télécharger", rapport, "rapport_uroflow.txt", "text/plain")
 
-# ── Chargement modèle ─────────────────────────────────────────────────────────
-with st.spinner("Initialisation du modèle..."):
-    model, scaler = get_model()
-st.success("✓ Modèle prêt")
+# ── Chargement du VRAI modèle ──────────────────────────────────────────────────
+with st.spinner("Chargement du modèle entraîné sur données réelles..."):
+    try:
+        model, scaler, feature_cols = get_model()
+        st.success(f"✓ Modèle réel chargé — {len(feature_cols)} features, entraîné sur 1019 sons calibrés")
+    except FileNotFoundError as e:
+        st.error(f"Fichiers du modèle introuvables : {e}")
+        st.stop()
 st.markdown("---")
 
 # ── Interface ─────────────────────────────────────────────────────────────────
@@ -188,9 +184,9 @@ st.header("① Choisir une source audio")
 
 tab1, tab2, tab3 = st.tabs(["🎙️ Enregistrer", "📁 Uploader un fichier .wav", "🎲 Démonstration"])
 
-# ── TAB 1 : Enregistrement direct ─────────────────────────────────────────────
 with tab1:
-    st.markdown("Enregistre directement depuis ton micro — jet d'eau, miction, ou tout autre son.")
+    st.markdown("Enregistre directement depuis ton micro.")
+    st.info("⚠️ Le modèle a été calibré sur des microphones spécifiques (iPhone, Samsung A53). Les résultats peuvent varier selon ton appareil.")
     audio_recorded = st.audio_input("🎙️ Appuie pour enregistrer")
 
     if audio_recorded is not None:
@@ -205,12 +201,11 @@ with tab1:
             y, sr = librosa.load(tmp_path, sr=22050)
             duration = len(y) / sr
             os.unlink(tmp_path)
-            features = extract_features_from_audio(y, sr)
-        analyser_et_afficher(features, duration, model, scaler, "Enregistrement microphone")
+            features = extract_features_segmented(y, sr, feature_cols)
+        analyser_et_afficher(features, duration, model, scaler, feature_cols, "Enregistrement microphone")
 
-# ── TAB 2 : Upload fichier ────────────────────────────────────────────────────
 with tab2:
-    st.markdown("Upload un fichier `.wav` depuis ton téléphone ou ordinateur.")
+    st.markdown("Upload un fichier `.wav`.")
     uploaded = st.file_uploader("Choisir un fichier audio", type=["wav"])
 
     if uploaded is not None:
@@ -225,30 +220,30 @@ with tab2:
             y, sr = librosa.load(tmp_path, sr=22050)
             duration = len(y) / sr
             os.unlink(tmp_path)
-            features = extract_features_from_audio(y, sr)
-        analyser_et_afficher(features, duration, model, scaler, f"Fichier : {uploaded.name}")
+            features = extract_features_segmented(y, sr, feature_cols)
+        analyser_et_afficher(features, duration, model, scaler, feature_cols, f"Fichier : {uploaded.name}")
 
-# ── TAB 3 : Démo ──────────────────────────────────────────────────────────────
 with tab3:
-    st.markdown("Génère un son aléatoire pour tester l'interface.")
+    st.markdown("Utilise des features simulées pour tester l'interface rapidement.")
     col1, col2 = st.columns(2)
-    demo_normal  = col1.button("🟢 Son normal")
-    demo_anormal = col2.button("🔴 Son anormal")
+    demo_normal  = col1.button("🟢 Son normal simulé")
+    demo_anormal = col2.button("🔴 Son anormal simulé")
 
     if demo_normal or demo_anormal:
-        seed = np.random.randint(0, 10000)  # seed aléatoire à chaque clic
+        seed = np.random.randint(0, 10000)
         np.random.seed(seed)
+        n = len(feature_cols)
         if demo_normal:
-            features = np.random.randn(INPUT_DIM).astype(np.float32) * 0.5
+            features = np.random.randn(n).astype(np.float32) * 0.3
             duration = 15.0
-            label = "Démonstration — son normal (aléatoire)"
+            label = "Démonstration — son normal simulé"
         else:
-            features = np.random.randn(INPUT_DIM).astype(np.float32) * 2.5
+            features = np.random.randn(n).astype(np.float32) * 2.0
             duration = 8.0
-            label = "Démonstration — son anormal (aléatoire)"
+            label = "Démonstration — son anormal simulé"
         st.markdown("---")
         st.header("② Analyse en cours...")
-        analyser_et_afficher(features, duration, model, scaler, label)
+        analyser_et_afficher(features, duration, model, scaler, feature_cols, label)
 
 st.markdown("---")
 st.caption("UroFlow AI — Projet académique | Hôpital Saint-Louis | ⚠️ Ne remplace pas un avis médical")
